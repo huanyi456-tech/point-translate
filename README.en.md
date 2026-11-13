@@ -6,7 +6,7 @@ Project home: https://github.com/huanyi456-tech/point-translate
 
 A small Manifest V3 extension for people who are not comfortable reading English:
 
-- **Hover to translate** — rest the pointer on an English sentence and a Chinese tooltip appears after about 0.4 s.
+- **Hover to translate** — rest the pointer on an English sentence and a Chinese tooltip appears after a moment.
 - **Translate the whole page** — replace the page text with Chinese while keeping the layout.
 - **Restore the original** — switch back to English at any time.
 - **No account, no API key.**
