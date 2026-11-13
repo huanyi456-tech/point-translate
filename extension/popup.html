@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>指译</title>
+  <link rel="stylesheet" href="popup.css" />
+</head>
+<body>
+  <main class="app">
+    <header class="brand">
+      <div class="logo" aria-hidden="true">译</div>
+      <div class="brand-text">
+        <h1>指译</h1>
+        <p>鼠标指到哪，中文就到哪</p>
+      </div>
+      <span class="badge" id="pageBadge">检查中</span>
+    </header>
+
+    <section class="hero">
+      <button class="primary" id="translateBtn" type="button">
+        <span class="primary-icon" aria-hidden="true">
+          <svg viewBox="0 0 24 24" width="19" height="19" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M4 5h9M8.5 3v2c0 4.5-2 7.5-5 9" />
+            <path d="M6 9.5c1.3 2.2 3.4 3.8 5.8 4.5" />
+            <path d="M14 21l4-10 4 10M15.4 17h5.2" />
+          </svg>
+        </span>
+        <span class="primary-text">
+          <strong id="translateBtnText">翻译整个页面</strong>
+          <small id="translateBtnHint">一键把英文网页变成中文</small>
+        </span>
+        <span class="primary-arrow" aria-hidden="true">→</span>
+      </button>
+      <p class="error" id="errorText" hidden></p>
+    </section>
+
+    <section class="card">
+      <label class="row">
+        <span class="row-text">
+          <strong>鼠标悬停翻译</strong>
+          <small>指针停在哪句话，就翻译哪句话</small>
+        </span>
+        <input class="switch" type="checkbox" id="hoverToggle" />
+      </label>
+      <div class="divider"></div>
+      <label class="row">
+        <span class="row-text">
+          <strong>显示右下角悬浮按钮</strong>
+          <small>随时翻译整页或恢复原文</small>
+        </span>
+        <input class="switch" type="checkbox" id="fabToggle" />
+      </label>
+    </section>
+
+    <section class="status">
+      <span class="status-dot" id="statusDot"></span>
+      <span id="statusText">Bing 翻译 · 无需登录</span>
+    </section>
+
+    <footer class="footer">
+      <span id="shortcutPage">Alt + A 翻译全页</span>
+      <span class="footer-sep">·</span>
+      <span id="shortcutHover">Alt + T 开关悬停</span>
+    </footer>
+  </main>
+
+  <script src="popup.js"></script>
+</body>
+</html>

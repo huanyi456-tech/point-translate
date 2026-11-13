@@ -1,0 +1,37 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  syntax:
+    name: Syntax and manifest
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Check JavaScript syntax
+        run: |
+          node --check extension/background.js
+          node --check extension/content.js
+          node --check extension/popup.js
+          node --check scripts/cdp-test.mjs
+          node --check scripts/cdp-verify.mjs
+          node --check scripts/load-extension.mjs
+      - name: Validate manifest JSON
+        run: python3 -m json.tool extension/manifest.json > /dev/null
+      - name: Package extension
+        run: |
+          cd extension
+          zip -r ../point-translate-extension.zip .
+      - uses: actions/upload-artifact@v4
+        with:
+          name: point-translate-extension
+          path: point-translate-extension.zip
