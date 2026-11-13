@@ -27,6 +27,21 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+async function fetchWithTimeout(url, options = {}, timeoutMs = 20000) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...options, signal: controller.signal });
+  } catch (error) {
+    if (error && error.name === 'AbortError') {
+      throw new Error('翻译服务连接超时');
+    }
+    throw error;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 function cacheGet(text) {
   const hit = memoryCache.get(text);
   if (hit) {
@@ -112,7 +127,7 @@ async function handleCommand(command) {
 /* Bing 网页翻译接口                                                   */
 /* ------------------------------------------------------------------ */
 
-function parseBingAuth(html) {
+function parseBingAuth(html, base = BING_BASE) {
   const ig = /IG\s*:\s*"([0-9A-Fa-f]+)"/.exec(html);
   const iid = /data-iid\s*=\s*"(translator\.\d+)"/.exec(html);
   const helper = /params_AbusePreventionHelper\s*=\s*\[(\d+)\s*,\s*"([^"]+)"/.exec(html);
@@ -122,7 +137,7 @@ function parseBingAuth(html) {
   }
 
   return {
-    base: BING_BASE,
+    base,
     ig: ig[1],
     iid: iid[1],
     key: helper[1],
@@ -132,17 +147,27 @@ function parseBingAuth(html) {
 }
 
 async function fetchBingAuth(base) {
-  const response = await fetch(`${base}/translator?setlang=zh-Hans`, {
+  const response = await fetchWithTimeout(`${base}/translator?setlang=zh-Hans`, {
     method: 'GET',
     credentials: 'omit',
     cache: 'no-store',
     headers: {
       'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.7'
     }
-  });
+  }, 20000);
   if (!response.ok) throw new Error(`Bing 翻译页面 HTTP ${response.status}`);
+
+  // 系统代理在中国大陆以外时，cn.bing.com 会 301 到 www.bing.com。
+  // 必须记住最终域名；否则后续 POST 会再次被 302 成 GET，响应体为空。
+  let finalBase = base;
+  try {
+    if (response.url) finalBase = new URL(response.url).origin;
+  } catch (error) {
+    finalBase = base;
+  }
+
   const html = await response.text();
-  return parseBingAuth(html);
+  return parseBingAuth(html, finalBase);
 }
 
 async function getBingAuth(force = false) {
@@ -169,7 +194,14 @@ async function getBingAuth(force = false) {
   }
 }
 
-async function bingTranslateOnce(text, auth) {
+function bingHttpError(status) {
+  const error = new Error(`Bing 翻译 HTTP ${status}`);
+  // 400/413 通常是请求过大，换域名或刷新令牌都没用，立即交给上层处理。
+  if (status === 400 || status === 413) error.permanent = true;
+  return error;
+}
+
+async function bingTranslateOnce(text, auth, base = auth.base) {
   const params = new URLSearchParams();
   params.set('fromLang', 'auto-detect');
   params.set('to', TARGET_LANG);
@@ -177,8 +209,8 @@ async function bingTranslateOnce(text, auth) {
   params.set('token', auth.token);
   params.set('key', auth.key);
 
-  const url = `${auth.base}/ttranslatev3?isVertical=1&IG=${encodeURIComponent(auth.ig)}&IID=${encodeURIComponent(auth.iid)}.1`;
-  const response = await fetch(url, {
+  const url = `${base}/ttranslatev3?isVertical=1&IG=${encodeURIComponent(auth.ig)}&IID=${encodeURIComponent(auth.iid)}.1`;
+  const response = await fetchWithTimeout(url, {
     method: 'POST',
     credentials: 'omit',
     cache: 'no-store',
@@ -187,15 +219,44 @@ async function bingTranslateOnce(text, auth) {
       'Accept': 'application/json, text/plain, */*'
     },
     body: params.toString()
-  });
+  }, 20000);
 
-  if (!response.ok) throw new Error(`Bing 翻译 HTTP ${response.status}`);
+  if (!response.ok) throw bingHttpError(response.status);
+
+  const raw = await response.text();
+  if (raw.trim()) return parseBingResponse(raw, response);
+
+  // 经过系统代理时，Bing 可能把 POST 302 成 GET，最终返回 200 + 空 body。
+  // 把 response.url 作为下一次 POST 的目标，保留请求体重新提交。
+  if (response.redirected && response.url && response.url !== url) {
+    const retry = await fetchWithTimeout(response.url, {
+      method: 'POST',
+      credentials: 'omit',
+      cache: 'no-store',
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8',
+        'Accept': 'application/json, text/plain, */*'
+      },
+      body: params.toString()
+    }, 20000);
+    if (!retry.ok) throw bingHttpError(retry.status);
+    return parseBingResponse(await retry.text(), retry);
+  }
+
+  throw new Error(`Bing 翻译返回空响应（HTTP ${response.status}）`);
+}
+
+function parseBingResponse(raw, response) {
+  if (!raw || !raw.trim()) {
+    throw new Error(`Bing 翻译返回空响应（HTTP ${response.status}）`);
+  }
 
   let data;
   try {
-    data = await response.json();
+    data = JSON.parse(raw);
   } catch (error) {
-    throw new Error('Bing 翻译返回了无法解析的内容');
+    const type = response.headers.get('content-type') || '未知类型';
+    throw new Error(`Bing 翻译返回了无法解析的内容（HTTP ${response.status}，${type}）`);
   }
 
   const translated = data
@@ -217,12 +278,29 @@ async function bingTranslate(text) {
   for (let attempt = 0; attempt < 2; attempt += 1) {
     try {
       const auth = await getBingAuth(attempt > 0);
-      return await bingTranslateOnce(text, auth);
+      const bases = [auth.base];
+      const alternate = auth.base.includes('cn.bing.com') ? BING_FALLBACK_BASE : BING_BASE;
+      if (alternate !== auth.base) bases.push(alternate);
+
+      for (const base of bases) {
+        try {
+          const translated = await bingTranslateOnce(text, auth, base);
+          if (base !== auth.base) {
+            bingAuth = { ...auth, base };
+          }
+          return translated;
+        } catch (error) {
+          lastError = error;
+          if (error.permanent) throw error;
+        }
+      }
     } catch (error) {
+      if (error.permanent) throw error;
       lastError = error;
-      bingAuth = null;
-      if (attempt === 0) await sleep(250);
     }
+
+    bingAuth = null;
+    if (attempt === 0) await sleep(250);
   }
 
   throw lastError || new Error('Bing 翻译失败');
@@ -349,7 +427,7 @@ async function translateOne(text) {
 async function translateMany(texts) {
   const results = new Array(texts.length);
   let cursor = 0;
-  const workerCount = Math.min(3, Math.max(1, texts.length));
+  const workerCount = Math.min(12, Math.max(1, texts.length));
 
   async function worker() {
     while (cursor < texts.length) {

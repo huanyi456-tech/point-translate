@@ -19,7 +19,7 @@ Translation text is sent to Bing's web translator, with MyMemory as a fallback. 
 
 ## Install (about one minute)
 
-1. Download and unzip `dist/指译-Chrome插件-v1.0.0.zip`.
+1. Download and unzip `dist/指译-Chrome插件-v1.0.1.zip`.
 2. Open `chrome://extensions` in Chrome.
 3. Turn on **Developer mode** (top right).
 4. Click **Load unpacked** (top left).

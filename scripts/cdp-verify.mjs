@@ -1,12 +1,13 @@
 /* 真实 Chrome + CDP 端到端验收：悬停、整页、动态内容、恢复。 */
 import { writeFile, mkdir } from 'node:fs/promises';
+import { realpathSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { resolve } from 'node:path';
 
 const DEBUG = process.env.CDP || 'http://127.0.0.1:9333';
 const PAGE_URL = process.env.PAGE_URL || 'http://127.0.0.1:8799/';
 const OUT = process.env.OUT || 'tests/shots';
-const EXT_DIR = resolve(fileURLToPath(new URL('../extension', import.meta.url)));
+const EXT_DIR = resolve(process.env.EXT_PATH || fileURLToPath(new URL('../extension', import.meta.url)));
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 class CDP {
@@ -60,8 +61,10 @@ async function extensionId() {
   const browser = await new CDP(version.webSocketDebuggerUrl).connect();
   const { extensions } = await browser.send('Extensions.getExtensions');
   browser.close();
-  const wanted = process.env.EXT_PATH ? resolve(process.env.EXT_PATH) : EXT_DIR;
-  const ext = extensions.find((item) => item.path === wanted);
+  const wanted = realpathSync(process.env.EXT_PATH ? resolve(process.env.EXT_PATH) : EXT_DIR);
+  const ext = extensions.find((item) => {
+    try { return realpathSync(item.path) === wanted; } catch (error) { return item.path === wanted; }
+  });
   if (!ext) throw new Error('extension not loaded');
   return ext.id;
 }

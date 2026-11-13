@@ -15,11 +15,12 @@
   };
 
   const HOST_ID = 'zh-translator-root';
-  const HOVER_DELAY_MS = 380;
+  const HOVER_DELAY_MS = 280;
   const HIDE_DELAY_MS = 260;
-  const MAX_CHUNK_CHARS = 2200;
-  const MAX_NODE_CHARS = 1800;
+  const MAX_CHUNK_CHARS = 1200;
+  const MAX_NODE_CHARS = 1200;
   const MAX_HOVER_CHARS = 320;
+  const MAX_CHUNK_ITEMS = 22;
 
   const BLOCK_BOUNDARY_TAGS = new Set([
     'P', 'LI', 'H1', 'H2', 'H3', 'H4', 'H5', 'H6',
@@ -337,8 +338,11 @@
   }
 
   function buildChunks(entries) {
-    const groups = new Map();
     let markerId = 0;
+    const chunks = [];
+    // 不按 DOM 区块分组：很多网站的导航/页脚有上百个小块，
+    // 一块一个请求会非常慢；统一装入接近上限的批次即可。
+    let current = { text: '', items: [] };
 
     for (const entry of entries) {
       const parts = entry.original.length > MAX_NODE_CHARS
@@ -347,38 +351,26 @@
       entry.parts = parts;
       entry.partResults = new Array(parts.length).fill(null);
 
-      const key = entry.block || entry.node.parentElement || document.body;
-      if (!groups.has(key)) groups.set(key, []);
-      groups.get(key).push(entry);
-    }
+      for (let partIndex = 0; partIndex < entry.parts.length; partIndex += 1) {
+        const id = `ZT${markerId}`;
+        markerId += 1;
+        // Bing 对自定义 HTML 标签的处理不稳定，有时会把 <x-t> 整个丢掉。
+        // 用纯文本标记更可靠：@@ZT0@@正文@@/ZT0@@。
+        let partText = entry.parts[partIndex];
+        if (partText.includes('@@')) partText = partText.replace(/@@/g, '@\u200B@');
+        const marker = `@@${id}@@${partText}@@/${id}@@`;
 
-    const chunks = [];
-    for (const groupEntries of groups.values()) {
-      let current = { text: '', items: [] };
-
-      for (const entry of groupEntries) {
-        for (let partIndex = 0; partIndex < entry.parts.length; partIndex += 1) {
-          const id = `ZT${markerId}`;
-          markerId += 1;
-          // Bing 对自定义 HTML 标签的处理不稳定，有时会把 <x-t> 整个丢掉。
-          // 用纯文本标记更可靠：@@ZT0@@正文@@/ZT0@@。
-          let partText = entry.parts[partIndex];
-          if (partText.includes('@@')) partText = partText.replace(/@@/g, '@\u200B@');
-          const marker = `@@${id}@@${partText}@@/${id}@@`;
-
-          if (current.text && current.text.length + marker.length + 1 > MAX_CHUNK_CHARS) {
-            chunks.push(current);
-            current = { text: '', items: [] };
-          }
-
-          current.text += current.text ? ` ${marker}` : marker;
-          current.items.push({ id, entry, partIndex });
+        if (current.text && (current.text.length + marker.length + 1 > MAX_CHUNK_CHARS || current.items.length >= MAX_CHUNK_ITEMS)) {
+          chunks.push(current);
+          current = { text: '', items: [] };
         }
-      }
 
-      if (current.text) chunks.push(current);
+        current.text += current.text ? ` ${marker}` : marker;
+        current.items.push({ id, entry, partIndex });
+      }
     }
 
+    if (current.text) chunks.push(current);
     return chunks;
   }
 
@@ -485,8 +477,71 @@
     return { cancelled: false, failed };
   }
 
+  function chunkFromItems(items) {
+    const text = items.map((item) => {
+      let value = item.entry.parts[item.partIndex];
+      if (value.includes('@@')) value = value.replace(/@@/g, '@\u200B@');
+      return `@@${item.id}@@${value}@@/${item.id}@@`;
+    }).join(' ');
+    return { text, items };
+  }
+
+  async function translateChunk(chunk, token, depth = 0, initialResult = null) {
+    let result = initialResult;
+    if (!result) {
+      try {
+        const results = await requestTranslationBatch([chunk.text]);
+        result = results[0];
+      } catch (error) {
+        result = { ok: false, error: error.message || String(error) };
+      }
+    }
+
+    if (result && result.ok && typeof result.text === 'string') {
+      try {
+        const applied = applyChunk(chunk, result.text);
+        let failed = 0;
+
+        if (applied.missing.length) {
+          // 标记被翻译服务吞掉时，逐条重译缺失的片段，保证不静默漏译。
+          const fallback = await translateMissingItems(applied.missing, token);
+          if (fallback.cancelled) {
+            return { cancelled: true, failedChunks: 0, missingMarkers: applied.missing.length };
+          }
+          failed = fallback.failed;
+        }
+
+        return {
+          ok: failed === 0,
+          failedChunks: failed > 0 ? 1 : 0,
+          missingMarkers: applied.missing.length
+        };
+      } catch (error) {
+        result = { ok: false, error: error.message || String(error) };
+      }
+    }
+
+    const message = String((result && result.error) || '翻译失败');
+
+    // Bing 偶尔对较大的批次返回 400；对半拆分后重试，通常即可成功。
+    if (depth < 2 && chunk.items.length > 1 && /HTTP 400|HTTP 413/.test(message)) {
+      const middle = Math.ceil(chunk.items.length / 2);
+      const left = await translateChunk(chunkFromItems(chunk.items.slice(0, middle)), token, depth + 1);
+      if (left.cancelled) return left;
+      const right = await translateChunk(chunkFromItems(chunk.items.slice(middle)), token, depth + 1);
+      if (right.cancelled) return right;
+      return {
+        ok: left.ok && right.ok,
+        failedChunks: left.failedChunks + right.failedChunks,
+        missingMarkers: left.missingMarkers + right.missingMarkers
+      };
+    }
+
+    return { ok: false, failedChunks: 1, missingMarkers: 0, error: message };
+  }
+
   async function translateChunks(chunks, token, options = {}) {
-    const batchSize = 3;
+    const batchSize = 12;
     let failedChunks = 0;
     let missingMarkers = 0;
     let lastError = null;
@@ -512,32 +567,21 @@
       for (let index = 0; index < batch.length; index += 1) {
         const result = results[index];
         if (!result || !result.ok || typeof result.text !== 'string') {
-          failedChunks += 1;
           if (result && result.error) lastError = new Error(result.error);
-          continue;
         }
 
-        try {
-          const applied = applyChunk(batch[index], result.text);
-          missingMarkers += applied.missing.length;
-
-          if (applied.missing.length) {
-            // 标记被翻译服务吞掉时，逐条重译缺失的片段，保证不静默漏译。
-            const fallback = await translateMissingItems(applied.missing, token);
-            if (fallback.cancelled) {
-              return { cancelled: true, failedChunks, missingMarkers, lastError };
-            }
-            if (fallback.failed > 0) failedChunks += 1;
-          }
-        } catch (error) {
-          failedChunks += 1;
-          lastError = error;
+        const outcome = await translateChunk(batch[index], token, 0, result);
+        if (outcome.cancelled) {
+          return { cancelled: true, failedChunks, missingMarkers, lastError };
         }
+        failedChunks += outcome.failedChunks;
+        missingMarkers += outcome.missingMarkers;
+        if (!outcome.ok && outcome.error) lastError = new Error(outcome.error);
       }
 
       pageState.doneChunks += batch.length;
       updateUi();
-      if (!options.silent) await sleep(40);
+      if (!options.silent) await sleep(10);
     }
 
     return { cancelled: false, failedChunks, missingMarkers, lastError };
