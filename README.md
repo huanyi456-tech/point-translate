@@ -24,7 +24,7 @@
 
 ### Chrome / Edge 电脑版
 
-1. 下载并解压 [`指译-Chrome插件-v1.0.1.zip`](dist/指译-Chrome插件-v1.0.1.zip)。  
+1. 下载并解压 [`指译-Chrome插件-v1.0.2.zip`](dist/指译-Chrome插件-v1.0.2.zip)。
    解压后会看到一个文件夹 **`point-translate-extension`**，里面有 `manifest.json`。
 2. 在 Chrome 地址栏输入 `chrome://extensions` 并回车。  
    （Edge 输入 `edge://extensions`。）
@@ -163,7 +163,9 @@ node --check extension/content.js
 node --check extension/popup.js
 ```
 
-已知限制：不翻译 PDF、图片内文字、视频字幕、输入框里手动输入的内容；`all_frames` 为 `false`，跨域 iframe 中的文字可能不翻译。
+已知限制：不翻译 PDF、图片内文字、视频字幕、script/style/code/pre 里的内容；`all_frames` 为 `false`，跨域 iframe 中的文字可能不翻译。
+
+页面正文位于 **open shadow DOM**（例如 Gradio / RVC WebUI）时，扩展会进入 shadow root 收集并翻译可见文字；这是 1.0.2 新增的支持。
 
 ## 六、开源协议
 

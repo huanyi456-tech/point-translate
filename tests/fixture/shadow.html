@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Shadow DOM test</title>
+  <style>
+    body { font-family: system-ui, sans-serif; margin: 40px; line-height: 1.6; }
+    h1 { font-size: 28px; }
+    code { background: #f1f5f9; padding: 2px 4px; }
+  </style>
+</head>
+<body>
+  <div id="host"></div>
+  <script>
+    const root = document.getElementById('host').attachShadow({ mode: 'open' });
+    root.innerHTML = `
+      <h1>Shadow DOM translation test</h1>
+      <p id="sp">This paragraph lives inside an open shadow root and should be translated into Chinese.</p>
+      <pre><code id="code">const answer = 42; // this code must stay in English</code></pre>
+    `;
+  </script>
+</body>
+</html>

@@ -6,6 +6,7 @@ import { resolve } from 'node:path';
 
 const DEBUG = process.env.CDP || 'http://127.0.0.1:9333';
 const PAGE_URL = process.env.PAGE_URL || 'http://127.0.0.1:8799/';
+const SHADOW_URL = new URL('shadow.html', PAGE_URL).href;
 const OUT = process.env.OUT || 'tests/shots';
 const EXT_DIR = resolve(process.env.EXT_PATH || fileURLToPath(new URL('../extension', import.meta.url)));
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -237,6 +238,40 @@ async function main() {
   assert(originals.placeholder === 'Search for sleep tips', 'placeholder not restored');
   assert(originals.dyn.startsWith('This new paragraph'), 'dynamic paragraph not restored');
   await shot(cdp, 'page-restored');
+
+  // 7) open shadow DOM：Gradio 等 WebUI 的正文在 shadow root 里
+  await cdp.send('Page.navigate', { url: SHADOW_URL });
+  await sleep(2200);
+  const shadowRect = await evaluate(cdp, `(() => {
+    const root = document.querySelector('#host').shadowRoot;
+    const r = root.querySelector('#sp').getBoundingClientRect();
+    return { x: r.x + 30, y: r.y + 12 };
+  })()`);
+  await moveTo(shadowRect.x, shadowRect.y);
+  const shadowHover = await waitForTooltipTranslation(cdp);
+  assert(shadowHover.visible, 'shadow hover tooltip should be visible');
+  assert(/[\u4e00-\u9fff]/.test(shadowHover.zh), `shadow hover translation empty: ${JSON.stringify(shadowHover)}`);
+  console.log('SHADOW HOVER done', JSON.stringify(shadowHover));
+
+  const shadowTranslated = await evaluate(sw, `chrome.tabs.sendMessage(${tabId}, { type: 'translatePage' })`);
+  assert(shadowTranslated.ok, `shadow translate failed: ${JSON.stringify(shadowTranslated)}`);
+  assert(shadowTranslated.count === 2, `expected 2 shadow entries, got ${shadowTranslated.count}`);
+  assert(shadowTranslated.failed === 0, `expected 0 shadow failed, got ${shadowTranslated.failed}`);
+  const shadowAfter = await evaluate(cdp, `(() => {
+    const root = document.querySelector('#host').shadowRoot;
+    return {
+      h1: root.querySelector('h1').textContent,
+      p: root.querySelector('#sp').textContent,
+      code: root.querySelector('#code').textContent
+    };
+  })()`);
+  console.log('SHADOW PAGE', JSON.stringify(shadowAfter, null, 2));
+  assert(/[\u4e00-\u9fff]/.test(shadowAfter.h1), 'shadow h1 not translated');
+  assert(/[\u4e00-\u9fff]/.test(shadowAfter.p), 'shadow paragraph not translated');
+  assert(shadowAfter.code.includes('const answer = 42'), 'code block must stay untranslated');
+  await shot(cdp, 'page-shadow');
+  const shadowRestored = await evaluate(sw, `chrome.tabs.sendMessage(${tabId}, { type: 'restorePage' })`);
+  assert(shadowRestored.ok, 'shadow restore failed');
 
   cdp.close(); sw.close();
   console.log('ALL PASS');

@@ -19,7 +19,7 @@
   const HIDE_DELAY_MS = 260;
   const MAX_CHUNK_CHARS = 1200;
   const MAX_NODE_CHARS = 1200;
-  const MAX_HOVER_CHARS = 320;
+  const MAX_HOVER_CHARS = 600;
   const MAX_CHUNK_ITEMS = 22;
 
   const BLOCK_BOUNDARY_TAGS = new Set([
@@ -54,6 +54,7 @@
     originalText: new Map(),
     originalAttrs: new Map(),
     observer: null,
+    observedRoots: new Set(),
     supplementTimer: null,
     supplementing: false
   };
@@ -111,7 +112,39 @@
   }
 
   function isInsideUi(node) {
-    return Boolean(node && host && (node === host || host.contains(node)));
+    if (!node || !host) return false;
+    if (node === host || host.contains(node)) return true;
+    const root = typeof node.getRootNode === 'function' ? node.getRootNode() : null;
+    return Boolean(root && root.host === host);
+  }
+
+  // 不少现代 WebUI（例如 Gradio）把正文放在 open shadow DOM 中。
+  // document.body.innerText 和普通 TreeWalker 都进不去，必须显式下钻。
+  function getOpenShadowRoots(root) {
+    const roots = [];
+    const visit = (scope) => {
+      if (!scope || typeof scope.querySelectorAll !== 'function') return;
+      for (const element of scope.querySelectorAll('*')) {
+        if (!element.shadowRoot) continue;
+        roots.push(element.shadowRoot);
+        visit(element.shadowRoot);
+      }
+    };
+    visit(root);
+    return roots;
+  }
+
+  // elementFromPoint 只返回 shadow host，需要逐层进入 open shadow root。
+  function deepElementFromPoint(x, y) {
+    let element = document.elementFromPoint(x, y);
+    let guard = 0;
+    while (element && element.shadowRoot && guard < 12) {
+      const inner = element.shadowRoot.elementFromPoint(x, y);
+      if (!inner || inner === element) break;
+      element = inner;
+      guard += 1;
+    }
+    return element;
   }
 
   function getBlockForNode(node) {
@@ -278,59 +311,63 @@
 
   function collectEntries(root) {
     const entries = [];
-    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
-      acceptNode(node) {
-        const parent = node.parentElement;
-        if (!parent) return NodeFilter.FILTER_REJECT;
-        if (parent.closest(SKIP_SELECTOR)) return NodeFilter.FILTER_REJECT;
-        if (!isTranslatable(node.nodeValue)) return NodeFilter.FILTER_REJECT;
-        if (!isVisible(parent)) return NodeFilter.FILTER_REJECT;
-        if (pageState.originalText.has(node)) return NodeFilter.FILTER_REJECT;
-        return NodeFilter.FILTER_ACCEPT;
-      }
-    });
+    const scopes = [root, ...getOpenShadowRoots(root)];
 
-    while (walker.nextNode()) {
-      const node = walker.currentNode;
-      const block = getBlockForNode(node);
-      if (!block) continue;
-      entries.push({
-        kind: 'text',
-        node,
-        original: node.nodeValue,
-        block,
-        parts: null,
-        partResults: null,
-        applied: false
+    for (const scope of scopes) {
+      const walker = document.createTreeWalker(scope, NodeFilter.SHOW_TEXT, {
+        acceptNode(node) {
+          const parent = node.parentElement;
+          if (!parent) return NodeFilter.FILTER_REJECT;
+          if (parent.closest(SKIP_SELECTOR)) return NodeFilter.FILTER_REJECT;
+          if (!isTranslatable(node.nodeValue)) return NodeFilter.FILTER_REJECT;
+          if (!isVisible(parent)) return NodeFilter.FILTER_REJECT;
+          if (pageState.originalText.has(node)) return NodeFilter.FILTER_REJECT;
+          return NodeFilter.FILTER_ACCEPT;
+        }
       });
-    }
 
-    const attrNodes = root.querySelectorAll('input[placeholder], textarea[placeholder], img[alt], [title]');
-    for (const element of attrNodes) {
-      if (element.closest(`#${HOST_ID}, [contenteditable]:not([contenteditable="false"])`)) continue;
-      if (!isVisible(element)) continue;
-
-      const attrs = [];
-      if (element.matches('input[placeholder], textarea[placeholder]')) attrs.push('placeholder');
-      if (element.matches('img[alt]')) attrs.push('alt');
-      if (element.hasAttribute('title')) attrs.push('title');
-
-      for (const attr of attrs) {
-        const original = element.getAttribute(attr);
-        if (!isTranslatable(original)) continue;
-        const already = pageState.originalAttrs.get(element);
-        if (already && Object.prototype.hasOwnProperty.call(already, attr)) continue;
-
+      while (walker.nextNode()) {
+        const node = walker.currentNode;
+        const block = getBlockForNode(node);
+        if (!block) continue;
         entries.push({
-          kind: 'attr',
-          element,
-          attr,
-          original,
-          block: element,
+          kind: 'text',
+          node,
+          original: node.nodeValue,
+          block,
           parts: null,
           partResults: null,
           applied: false
         });
+      }
+
+      const attrNodes = scope.querySelectorAll('input[placeholder], textarea[placeholder], img[alt], [title]');
+      for (const element of attrNodes) {
+        if (element.closest(`#${HOST_ID}, [contenteditable]:not([contenteditable="false"])`)) continue;
+        if (!isVisible(element)) continue;
+
+        const attrs = [];
+        if (element.matches('input[placeholder], textarea[placeholder]')) attrs.push('placeholder');
+        if (element.matches('img[alt]')) attrs.push('alt');
+        if (element.hasAttribute('title')) attrs.push('title');
+
+        for (const attr of attrs) {
+          const original = element.getAttribute(attr);
+          if (!isTranslatable(original)) continue;
+          const already = pageState.originalAttrs.get(element);
+          if (already && Object.prototype.hasOwnProperty.call(already, attr)) continue;
+
+          entries.push({
+            kind: 'attr',
+            element,
+            attr,
+            original,
+            block: element,
+            parts: null,
+            partResults: null,
+            applied: false
+          });
+        }
       }
     }
 
@@ -676,22 +713,36 @@
   }
 
   function scheduleSupplement() {
+    if (pageState.active) startObserver();
     if (pageState.supplementTimer) clearTimeout(pageState.supplementTimer);
     pageState.supplementTimer = setTimeout(supplementPage, 900);
   }
 
+  function observeCurrentRoots() {
+    if (!pageState.observer || !document.body) return;
+    const roots = [document.body, ...getOpenShadowRoots(document.body)];
+    for (const root of roots) {
+      if (pageState.observedRoots.has(root)) continue;
+      pageState.observer.observe(root, { childList: true, subtree: true });
+      pageState.observedRoots.add(root);
+    }
+  }
+
   function startObserver() {
-    if (pageState.observer || !document.body) return;
-    pageState.observer = new MutationObserver((mutations) => {
-      if (!pageState.active || pageState.busy) return;
-      for (const mutation of mutations) {
-        if (mutation.type === 'childList' && mutation.addedNodes.length) {
-          scheduleSupplement();
-          return;
+    if (!document.body) return;
+    if (!pageState.observer) {
+      pageState.observer = new MutationObserver((mutations) => {
+        if (!pageState.active || pageState.busy) return;
+        observeCurrentRoots();
+        for (const mutation of mutations) {
+          if (mutation.type === 'childList' && mutation.addedNodes.length) {
+            scheduleSupplement();
+            return;
+          }
         }
-      }
-    });
-    pageState.observer.observe(document.body, { childList: true, subtree: true });
+      });
+    }
+    observeCurrentRoots();
   }
 
   function stopObserver() {
@@ -699,6 +750,7 @@
       pageState.observer.disconnect();
       pageState.observer = null;
     }
+    pageState.observedRoots.clear();
     if (pageState.supplementTimer) {
       clearTimeout(pageState.supplementTimer);
       pageState.supplementTimer = null;
@@ -758,10 +810,14 @@
 
     if (!node) return '';
     if (node.nodeType === Node.TEXT_NODE) {
+      const parent = node.parentElement;
+      if (!parent || parent.closest(SKIP_SELECTOR)) return '';
       if (!isTranslatable(node.nodeValue)) return '';
       return extractSentence(node.nodeValue, offset);
     }
     if (node.nodeType === Node.ELEMENT_NODE) {
+      if (node === document.body || node === document.documentElement) return '';
+      if (node.closest(SKIP_SELECTOR)) return '';
       const text = (node.innerText || node.textContent || '').replace(/\s+/g, ' ').trim();
       if (text.length <= MAX_HOVER_CHARS && isTranslatable(text)) return text;
     }
@@ -769,7 +825,7 @@
   }
 
   function getHoverCandidate(x, y) {
-    const element = document.elementFromPoint(x, y);
+    const element = deepElementFromPoint(x, y);
     if (!element || isInsideUi(element)) return null;
     if (element.closest(SKIP_SELECTOR)) return null;
 
@@ -778,11 +834,23 @@
       const sentence = getCaretSentence(x, y);
       return sentence && isTranslatable(sentence) ? sentence : null;
     }
-    if (!isVisible(block)) return null;
+    if (isInsideUi(block) || block.closest(SKIP_SELECTOR) || !isVisible(block)) return null;
 
     const raw = (block.innerText || block.textContent || '').replace(/\s+/g, ' ').trim();
     if (raw.length >= 2 && raw.length <= MAX_HOVER_CHARS && isTranslatable(raw)) {
       return raw;
+    }
+
+    // document.caretRangeFromPoint 不会进入 shadow DOM，会错误地返回 body/script。
+    // 对 shadow DOM 内容直接使用命中元素自身的文本，避免把脚本源码当英文翻译。
+    const root = typeof element.getRootNode === 'function' ? element.getRootNode() : null;
+    if (root && root.host) {
+      const text = (element.innerText || element.textContent || '').replace(/\s+/g, ' ').trim();
+      if (text.length >= 2 && isTranslatable(text)) {
+        if (text.length <= MAX_HOVER_CHARS) return text;
+        return extractSentence(text, 0);
+      }
+      return null;
     }
 
     const sentence = getCaretSentence(x, y);
